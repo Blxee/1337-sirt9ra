@@ -1,8 +1,10 @@
+use axum::{Router, extract::State, routing::get, serve};
 use chrono::{DateTime, TimeZone, Utc};
 use dotenvy::dotenv;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{env, error::Error};
+use tokio::net::TcpListener;
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -34,7 +36,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let token_data: TokenResponse = token_res.json().await?;
     let access_token = token_data.access_token;
 
-    let mut users: Vec<CursusUser> = fetch_students(&client, &access_token).await?;
+    let app = Router::new()
+        .route("/", get(get_rankings))
+        .with_state((client, access_token));
+
+    let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
+
+    println!("listening at {}..", listener.local_addr().unwrap());
+    serve(listener, app).await?;
+    Ok(())
+}
+
+async fn get_rankings(State((client, access_token)): State<(Client, String)>) -> String {
+    let mut users: Vec<CursusUser> = fetch_students(&client, &access_token).await.unwrap();
 
     users = users
         .into_iter()
@@ -43,25 +57,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     users.sort_by_key(|s| (s.level * 100.) as u64);
 
+    let mut rankings = String::new();
+
     for (i, user) in users.iter().enumerate() {
-        println!(
-            "{:3}(lvl-{:2.2}): {}",
+        rankings.push_str(&format!(
+            "{:3}(lvl-{:2.2}): {}\n",
             users.len() - i,
             user.level,
             user.user.usual_full_name.as_ref().unwrap(),
-        );
+        ));
     }
-
-    // let api_res = client
-    //     .get("https://api.intra.42.fr/v2/users/atahiri-/cursus_users")
-    //     .query(&[("filter[campus_id]", "16"), ("filter[cursus_id]", "21")])
-    //     .bearer_auth(&access_token)
-    //     .send()
-    //     .await?;
-    // let user: Vec<CursusUser> = api_res.json().await?;
-    // println!("{:?}", user[0].begin_at);
-
-    Ok(())
+    rankings
 }
 
 async fn fetch_students(
