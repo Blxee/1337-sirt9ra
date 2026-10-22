@@ -1,10 +1,18 @@
-use axum::{Router, extract::State, routing::get, serve};
-use chrono::{DateTime, TimeZone, Utc};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::{self, HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Redirect},
+    routing::get,
+    serve,
+};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use dotenvy::dotenv;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{env, error::Error};
+use std::{env, error::Error, time::Instant};
 use tokio::net::TcpListener;
+use tower_http::services::ServeDir;
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -37,7 +45,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let access_token = token_data.access_token;
 
     let app = Router::new()
-        .route("/", get(get_rankings))
+        .fallback_service(ServeDir::new("assets"))
+        .route("/api/rankings", get(get_rankings))
+        .route("/api/auth", get(login_handler))
+        .route("/api/callback", get(callback_handler))
         .with_state((client, access_token));
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
@@ -47,27 +58,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn get_rankings(State((client, access_token)): State<(Client, String)>) -> String {
+#[derive(Serialize)]
+struct Rank {
+    name: String,
+    level: f64,
+    image: String,
+}
+
+async fn get_rankings(State((client, access_token)): State<(Client, String)>) -> Json<Vec<Rank>> {
     let mut users: Vec<CursusUser> = fetch_students(&client, &access_token).await.unwrap();
 
-    users = users
-        .into_iter()
-        .filter(|s| s.begin_at.unwrap() > Utc.with_ymd_and_hms(2025, 10, 1, 0, 0, 0).unwrap())
-        .collect();
+    // users = users
+    //     .into_iter()
+    //     .filter(|s| s.begin_at.unwrap() > Utc.with_ymd_and_hms(2025, 10, 1, 0, 0, 0).unwrap())
+    //     .collect();
 
     users.sort_by_key(|s| (s.level * 100.) as u64);
 
-    let mut rankings = String::new();
+    let mut rankings = Vec::new();
 
-    for (i, user) in users.iter().enumerate() {
-        rankings.push_str(&format!(
-            "{:3}(lvl-{:2.2}): {}\n",
-            users.len() - i,
-            user.level,
-            user.user.usual_full_name.as_ref().unwrap(),
-        ));
+    for user in users.into_iter() {
+        rankings.push(Rank {
+            name: user.user.usual_full_name.unwrap(),
+            level: user.level,
+            image: user.user.image.unwrap().versions.unwrap().small.unwrap(),
+        });
     }
-    rankings
+    Json(rankings)
 }
 
 async fn fetch_students(
@@ -99,12 +116,80 @@ async fn fetch_students(
         break;
     }
 
-    let students: Vec<CursusUser> = students
-        .into_iter()
-        .filter(|s: &CursusUser| s.user.pool_year.as_deref() == Some("2025"))
-        .collect();
+    // let students: Vec<CursusUser> = students
+    //     .into_iter()
+    //     .filter(|s: &CursusUser| s.user.pool_year.as_deref() == Some("2025"))
+    //     .collect();
 
     return Ok(students);
+}
+
+pub async fn login_handler() -> Redirect {
+    let client_id = env::var("INTRA_42_CLIENT_ID").unwrap();
+
+    let auth_url = format!(
+        "https://api.intra.42.fr/oauth/authorize?client_id={}&redirect_uri={}&response_type=code",
+        client_id,
+        urlencoding::encode("http://localhost:8080/api/callback")
+    );
+    Redirect::temporary(&auth_url)
+}
+
+#[derive(Deserialize, Debug)]
+pub struct CallbackQuery {
+    pub code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct CallbackResult {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+    refresh_token: String,
+    scope: String,
+    created_at: u64,
+    secret_valid_until: u64,
+}
+
+pub async fn callback_handler(
+    Query(query): Query<CallbackQuery>,
+    State((client, _)): State<(Client, String)>,
+) -> impl IntoResponse {
+    let code = query.code.unwrap();
+    let client_id = env::var("INTRA_42_CLIENT_ID").unwrap();
+    let client_secret = env::var("INTRA_42_CLIENT_SECRET").unwrap();
+    let redirect_uri = "http://localhost:8080/api/callback";
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("client_id", &client_id),
+        ("client_secret", &client_secret),
+        ("code", &code),
+        ("redirect_uri", redirect_uri),
+    ];
+
+    let res: CallbackResult = client
+        .post("https://api.intra.42.fr/oauth/token")
+        .form(&params)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let mut headers = HeaderMap::new();
+    let cookie_value = format!(
+        "user_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        res.access_token, res.expires_in
+    );
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie_value).unwrap(),
+    );
+    headers.insert(header::LOCATION, HeaderValue::from_static("/"));
+    return (StatusCode::FOUND, headers).into_response();
 }
 
 // ##################

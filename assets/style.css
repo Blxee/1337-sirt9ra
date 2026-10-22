@@ -1,0 +1,40 @@
+#rankings-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.user-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    border-bottom: 1px solid #eee;
+}
+
+.user-card:last-child {
+    border-bottom: none;
+}
+
+.user-avatar {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    object-fit: cover;
+    background-color: #e0e0e0;
+}
+
+.user-name {
+    flex: 1;
+    font-weight: 600;
+    color: #222;
+}
+
+.user-level {
+    background-color: #00babc;
+    color: #ffffff;
+    font-size: 0.85rem;
+    font-weight: bold;
+    padding: 4px 10px;
+    border-radius: 12px;
+}
