@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/api/rankings", get(get_rankings))
         .route("/api/auth", get(login_handler))
         .route("/api/callback", get(callback_handler))
+        .route("/api/avatar", get(proxy_avatar))
         .with_state((client, access_token));
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
@@ -190,6 +191,71 @@ pub async fn callback_handler(
     );
     headers.insert(header::LOCATION, HeaderValue::from_static("/"));
     return (StatusCode::FOUND, headers).into_response();
+}
+
+#[derive(Deserialize)]
+pub struct AvatarQuery {
+    pub url: String,
+}
+
+pub async fn proxy_avatar(
+    Query(params): Query<AvatarQuery>,
+    State((client, access_token)): State<(Client, String)>,
+) -> impl IntoResponse {
+    // 1. Restrict proxying strictly to 42 CDN URLs for security
+    if !params.url.starts_with("https://cdn.intra.42.fr/") {
+        return (StatusCode::BAD_REQUEST, "Invalid image URL").into_response();
+    }
+
+    // 2. Fetch the image server-side with Bearer auth, User-Agent, and 42 Referer
+    let res = match client
+        .get(&params.url)
+        .bearer_auth(&access_token)
+        .header(
+            header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        .header(header::REFERER, "https://profile.intra.42.fr/")
+        .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => resp,
+        Ok(resp) => {
+            println!("CDN returned status: {} for URL: {}", resp.status(), params.url);
+            return (StatusCode::BAD_GATEWAY, format!("CDN error: {}", resp.status())).into_response();
+        }
+        Err(e) => {
+            println!("Network error fetching avatar: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Network error: {}", e)).into_response();
+        }
+    };
+
+    let content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("image/jpeg"));
+
+    let bytes = match res.bytes().await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to read image bytes",
+            )
+                .into_response();
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+
+    (StatusCode::OK, headers, bytes).into_response()
 }
 
 // ##################
