@@ -1,4 +1,5 @@
 # Copy this file into a .env file with your actual api credentials
 INTRA_42_CLIENT_ID="your client id"
 INTRA_42_CLIENT_SECRET="you client secret"
+DATABASE_URL=sqlite://sqlite.db
 

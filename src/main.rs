@@ -10,7 +10,11 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use dotenvy::dotenv;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{env, error::Error, time::Instant};
+use sqlx::{
+    prelude::FromRow,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
+use std::{env, error::Error, str::FromStr, time::Instant};
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 
@@ -19,9 +23,56 @@ struct TokenResponse {
     access_token: String,
 }
 
+#[derive(Debug, FromRow)]
+struct Usur {
+    id: i64,
+    name: String,
+    email: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
+
+    let database_url = env::var("DATABASE_URL").unwrap();
+    let options = SqliteConnectOptions::from_str(&database_url)
+        .unwrap()
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?;
+    // 3. Create a temporary table for this demonstration
+    sqlx::query!(
+        "CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE
+         );",
+    )
+    .execute(&pool)
+    .await?;
+
+    // 4. Insert data using runtime parameter binding (prevents SQL injection)
+    let name = "Alice";
+    let email = "alice@example.com";
+
+    sqlx::query!(
+        "INSERT OR IGNORE INTO users (name, email) VALUES (?, ?)",
+        name,
+        email
+    )
+    .execute(&pool)
+    .await?;
+
+    // 5. Query and map data to your struct using query_as
+    let users = sqlx::query_as::<_, Usur>("SELECT id, name, email FROM users")
+        .fetch_all(&pool)
+        .await?;
+
+    println!("Retrieved Users: {:#?}", users);
+    return Ok(());
+
     // Replace these with your actual 42 API application credentials
     let client_id = env::var("INTRA_42_CLIENT_ID").unwrap();
     let client_secret = env::var("INTRA_42_CLIENT_SECRET").unwrap();
@@ -211,23 +262,29 @@ pub async fn proxy_avatar(
     let res = match client
         .get(&params.url)
         .bearer_auth(&access_token)
-        .header(
-            header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        )
-        .header(header::REFERER, "https://profile.intra.42.fr/")
-        .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
         .send()
         .await
     {
         Ok(resp) if resp.status().is_success() => resp,
         Ok(resp) => {
-            println!("CDN returned status: {} for URL: {}", resp.status(), params.url);
-            return (StatusCode::BAD_GATEWAY, format!("CDN error: {}", resp.status())).into_response();
+            println!(
+                "CDN returned status: {} for URL: {}",
+                resp.status(),
+                params.url
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("CDN error: {}", resp.status()),
+            )
+                .into_response();
         }
         Err(e) => {
             println!("Network error fetching avatar: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Network error: {}", e)).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Network error: {}", e),
+            )
+                .into_response();
         }
     };
 
