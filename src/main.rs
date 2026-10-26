@@ -71,7 +71,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     println!("Retrieved Users: {:#?}", users);
-    return Ok(());
 
     // Replace these with your actual 42 API application credentials
     let client_id = env::var("INTRA_42_CLIENT_ID").unwrap();
@@ -120,20 +119,31 @@ struct Rank {
 async fn get_rankings(State((client, access_token)): State<(Client, String)>) -> Json<Vec<Rank>> {
     let mut users: Vec<CursusUser> = fetch_students(&client, &access_token).await.unwrap();
 
-    // users = users
-    //     .into_iter()
-    //     .filter(|s| s.begin_at.unwrap() > Utc.with_ymd_and_hms(2025, 10, 1, 0, 0, 0).unwrap())
-    //     .collect();
+    users = users
+        .into_iter()
+        .filter(|s| s.user.pool_year.as_deref() == Some("2026"))
+        .collect();
 
-    users.sort_by_key(|s| (s.level * 100.) as u64);
+    users.sort_by(|a, b| {
+        b.level
+            .partial_cmp(&a.level)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut rankings = Vec::new();
 
     for user in users.into_iter() {
+        let name = user.user.usual_full_name.unwrap_or(user.user.displayname);
+        let image = user
+            .user
+            .image
+            .and_then(|img| img.versions)
+            .and_then(|v| v.small)
+            .unwrap_or_default();
         rankings.push(Rank {
-            name: user.user.usual_full_name.unwrap(),
+            name,
             level: user.level,
-            image: user.user.image.unwrap().versions.unwrap().small.unwrap(),
+            image,
         });
     }
     Json(rankings)
@@ -145,7 +155,7 @@ async fn fetch_students(
 ) -> Result<Vec<CursusUser>, Box<dyn Error>> {
     let mut students = Vec::new();
 
-    for page in 1.. {
+    for page in 1..=5 {
         let api_res = client
             .get("https://api.intra.42.fr/v2/cursus_users")
             .query(&[
@@ -160,20 +170,19 @@ async fn fetch_students(
 
         let users: Vec<CursusUser> = api_res.json().await?;
 
-        if users.len() == 0 {
+        if users.is_empty() {
             break;
         }
 
+        let count = users.len();
         students.extend(users);
-        break;
+
+        if count < 100 {
+            break;
+        }
     }
 
-    // let students: Vec<CursusUser> = students
-    //     .into_iter()
-    //     .filter(|s: &CursusUser| s.user.pool_year.as_deref() == Some("2025"))
-    //     .collect();
-
-    return Ok(students);
+    Ok(students)
 }
 
 pub async fn login_handler() -> Redirect {
